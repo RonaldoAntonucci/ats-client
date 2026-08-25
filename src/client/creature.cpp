@@ -71,6 +71,80 @@ bool Creature::isHidden() const {
     return g_game.getClientVersion() < 1273 && m_healthPercent == 0;
 }
 
+CastProgressApplyResult Creature::applyCastProgressStart(const uint64_t castId, const uint32_t durationMs,
+                                                         const uint32_t remainingMs, const CastProgressClock::time_point now)
+{
+    if (castId == 0 || durationMs == 0)
+        return CastProgressApplyResult::IgnoredInvalid;
+
+    if (m_castProgress.lastAcceptedId) {
+        if (castId < *m_castProgress.lastAcceptedId)
+            return CastProgressApplyResult::IgnoredStale;
+        if (castId == *m_castProgress.lastAcceptedId && (!m_castProgress.active || m_castProgress.activeId != castId))
+            return CastProgressApplyResult::IgnoredStale;
+    }
+
+    const auto result = m_castProgress.active && m_castProgress.activeId == castId
+        ? CastProgressApplyResult::Refreshed
+        : CastProgressApplyResult::Applied;
+    const auto clampedRemainingMs = std::min(remainingMs, durationMs);
+
+    m_castProgress.activeId = castId;
+    m_castProgress.lastAcceptedId = castId;
+    m_castProgress.durationMs = durationMs;
+    m_castProgress.startedAt = now - std::chrono::milliseconds(durationMs - clampedRemainingMs);
+    m_castProgress.active = true;
+    return result;
+}
+
+bool Creature::applyCastProgressCancel(const uint64_t castId)
+{
+    if (!m_castProgress.active || m_castProgress.activeId != castId)
+        return false;
+
+    clearCastProgress();
+    return true;
+}
+
+void Creature::applyCastProgressSnapshot(const std::optional<CastProgressWireState>& snapshot,
+                                         const CastProgressClock::time_point now)
+{
+    clearCastProgress(true);
+    if (snapshot)
+        applyCastProgressStart(snapshot->id, snapshot->durationMs, snapshot->remainingMs, now);
+}
+
+void Creature::clearCastProgress(const bool clearOrdering)
+{
+    m_castProgress.activeId = 0;
+    m_castProgress.durationMs = 0;
+    m_castProgress.startedAt = {};
+    m_castProgress.active = false;
+    if (clearOrdering)
+        m_castProgress.lastAcceptedId.reset();
+}
+
+std::optional<float> Creature::getCastProgress(const CastProgressClock::time_point now)
+{
+    if (!m_castProgress.active)
+        return std::nullopt;
+
+    const auto elapsedMs = std::chrono::duration<float, std::milli>(now - m_castProgress.startedAt).count();
+    if (elapsedMs >= static_cast<float>(m_castProgress.durationMs)) {
+        clearCastProgress();
+        return std::nullopt;
+    }
+
+    return std::clamp(elapsedMs / static_cast<float>(m_castProgress.durationMs), 0.0F, 1.0F);
+}
+
+std::optional<uint64_t> Creature::getActiveCastProgressId() const
+{
+    if (!m_castProgress.active)
+        return std::nullopt;
+    return m_castProgress.activeId;
+}
+
 void Creature::onCreate() {
     callLuaField("onCreate");
 }
@@ -645,6 +719,7 @@ void Creature::onDisappear()
     m_disappearEvent = g_dispatcher.addEvent([self] {
         self->m_removed = true;
         self->stopWalk();
+        self->clearCastProgress(true);
 
         self->callLuaField("onDisappear");
 

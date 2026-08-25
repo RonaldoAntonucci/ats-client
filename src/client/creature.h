@@ -29,6 +29,26 @@
 
 #include "staticdata.h"
 
+#include <chrono>
+#include <optional>
+
+using CastProgressClock = std::chrono::steady_clock;
+
+struct CastProgressWireState
+{
+    uint64_t id{ 0 };
+    uint32_t durationMs{ 0 };
+    uint32_t remainingMs{ 0 };
+};
+
+enum class CastProgressApplyResult : uint8_t
+{
+    Applied,
+    Refreshed,
+    IgnoredInvalid,
+    IgnoredStale,
+};
+
  // @bindclass
 class Creature : public Thing
 {
@@ -181,6 +201,16 @@ minHeight,
     void setWidgetInformation(const UIWidgetPtr& info);
     UIWidgetPtr getWidgetInformation() { return m_widgetInformation; }
 
+    CastProgressApplyResult applyCastProgressStart(uint64_t castId, uint32_t durationMs, uint32_t remainingMs,
+                                                   CastProgressClock::time_point now = CastProgressClock::now());
+    bool applyCastProgressCancel(uint64_t castId);
+    void applyCastProgressSnapshot(const std::optional<CastProgressWireState>& snapshot,
+                                   CastProgressClock::time_point now = CastProgressClock::now());
+    void clearCastProgress(bool clearOrdering = false);
+    std::optional<float> getCastProgress(CastProgressClock::time_point now = CastProgressClock::now());
+    bool hasCastProgress() const { return m_castProgress.active; }
+    std::optional<uint64_t> getActiveCastProgressId() const;
+
     void setNameShader(const std::string& name) { m_nameShader = name; }
     std::string getNameShader() { return m_nameShader; }
 
@@ -278,6 +308,15 @@ private:
         CachedText numberText;
     };
 
+    struct CastProgressState
+    {
+        uint64_t activeId{ 0 };
+        std::optional<uint64_t> lastAcceptedId;
+        uint32_t durationMs{ 0 };
+        CastProgressClock::time_point startedAt{};
+        bool active{ false };
+    };
+
     std::vector<PaperdollPtr> m_paperdolls;
 
     UIWidgetPtr m_widgetInformation;
@@ -285,6 +324,7 @@ private:
     TilePtr m_walkingTile;
 
     std::unique_ptr<IconRenderData> m_icons;
+    CastProgressState m_castProgress;
 
     TexturePtr m_skullTexture;
     TexturePtr m_shieldTexture;
