@@ -132,10 +132,32 @@ std::optional<float> Creature::getCastProgress(const CastProgressClock::time_poi
     const auto elapsedMs = std::chrono::duration<float, std::milli>(now - m_castProgress.startedAt).count();
     if (elapsedMs >= static_cast<float>(m_castProgress.durationMs)) {
         clearCastProgress();
-        return std::nullopt;
+        return 1.0F;
     }
 
     return std::clamp(elapsedMs / static_cast<float>(m_castProgress.durationMs), 0.0F, 1.0F);
+}
+
+int Creature::getCastProgressFillWidth(const float progress)
+{
+    return static_cast<int>(std::floor(29.0F * std::clamp(progress, 0.0F, 1.0F)));
+}
+
+CastProgressBarGeometry Creature::getCastProgressBarGeometry(const Rect& textRect, const float progress)
+{
+    Rect background(0, 0, 31, 4);
+    background.moveHorizontalCenter(textRect.horizontalCenter());
+    background.moveBottom(textRect.top() - 2);
+
+    Rect track = background.expanded(-1);
+    Rect fill = track;
+    fill.setWidth(getCastProgressFillWidth(progress));
+    return { background, track, fill };
+}
+
+bool Creature::shouldDrawCastProgress(const int drawFlags)
+{
+    return (drawFlags & Otc::DrawCreatureInfo) != 0;
 }
 
 std::optional<uint64_t> Creature::getActiveCastProgressId() const
@@ -306,6 +328,21 @@ void Creature::drawInformation(const MapPosInfo& mapRect, const Point& dest, con
         backgroundRect.moveTop(textRect.top() + offset);
     if (backgroundRect.bottom() == parentRect.bottom())
         textRect.moveTop(backgroundRect.top() - offset);
+
+    if (const auto progress = getCastProgress(); progress && shouldDrawCastProgress(drawFlags)) {
+        auto geometry = getCastProgressBarGeometry(textRect, *progress);
+        if (!isScaled) {
+            geometry.background.bind(parentRect);
+            geometry.track = geometry.background.expanded(-1);
+            geometry.fill = geometry.track;
+            geometry.fill.setWidth(getCastProgressFillWidth(*progress));
+        }
+
+        g_drawPool.addFilledRect(geometry.background, getCastProgressBackgroundColor());
+        g_drawPool.addFilledRect(geometry.track, getCastProgressTrackColor());
+        if (!geometry.fill.isEmpty())
+            g_drawPool.addFilledRect(geometry.fill, getCastProgressFillColor());
+    }
 
     // health rect is based on background rect, so no worries
     Rect healthRect = backgroundRect.expanded(-1);

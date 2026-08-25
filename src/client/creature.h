@@ -49,6 +49,13 @@ enum class CastProgressApplyResult : uint8_t
     IgnoredStale,
 };
 
+struct CastProgressBarGeometry
+{
+    Rect background;
+    Rect track;
+    Rect fill;
+};
+
  // @bindclass
 class Creature : public Thing
 {
@@ -210,6 +217,12 @@ minHeight,
     std::optional<float> getCastProgress(CastProgressClock::time_point now = CastProgressClock::now());
     bool hasCastProgress() const { return m_castProgress.active; }
     std::optional<uint64_t> getActiveCastProgressId() const;
+    static int getCastProgressFillWidth(float progress);
+    static CastProgressBarGeometry getCastProgressBarGeometry(const Rect& textRect, float progress);
+    static bool shouldDrawCastProgress(int drawFlags);
+    static Color getCastProgressBackgroundColor() { return Color::black; }
+    static Color getCastProgressTrackColor() { return Color(0x40, 0x40, 0x40); }
+    static Color getCastProgressFillColor() { return Color::white; }
 
     void setNameShader(const std::string& name) { m_nameShader = name; }
     std::string getNameShader() { return m_nameShader; }

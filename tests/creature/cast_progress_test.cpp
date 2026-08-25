@@ -120,8 +120,9 @@ TEST(CastProgressState, RemainingZeroExpiresOnTheNextFrame)
     Creature creature;
     ASSERT_EQ(CastProgressApplyResult::Applied, creature.applyCastProgressStart(4, 1000, 0, startTime));
 
-    EXPECT_FALSE(creature.getCastProgress(startTime).has_value());
+    ASSERT_TRUE(creature.getCastProgress(startTime).has_value());
     EXPECT_FALSE(creature.hasCastProgress());
+    EXPECT_FALSE(creature.getCastProgress(startTime).has_value());
     EXPECT_EQ(CastProgressApplyResult::IgnoredStale, creature.applyCastProgressStart(4, 1000, 1000, startTime));
 }
 
@@ -200,8 +201,11 @@ TEST(CastProgressState, ExactDeadlineExpiresAndPreservesTheTombstone)
     Creature creature;
     ASSERT_EQ(CastProgressApplyResult::Applied, creature.applyCastProgressStart(15, 1000, 1000, startTime));
 
-    EXPECT_FALSE(creature.getCastProgress(startTime + std::chrono::milliseconds(1000)).has_value());
+    const auto finalProgress = creature.getCastProgress(startTime + std::chrono::milliseconds(1000));
+    ASSERT_TRUE(finalProgress.has_value());
+    EXPECT_FLOAT_EQ(1.0F, *finalProgress);
     EXPECT_FALSE(creature.hasCastProgress());
+    EXPECT_FALSE(creature.getCastProgress(startTime + std::chrono::milliseconds(1000)).has_value());
     EXPECT_EQ(CastProgressApplyResult::IgnoredStale, creature.applyCastProgressStart(15, 1000, 500, startTime));
 }
 
@@ -505,4 +509,95 @@ TEST(CastProgressProtocol, InvalidSnapshotMarkerFailsDeterministically)
     const auto msg = makeInputMessage(std::string(1, static_cast<char>(2)));
 
     EXPECT_THROW(CastProgressProtocol::parseSnapshotTail(msg, creature, true, startTime), stdext::exception);
+}
+
+TEST(CastProgressGeometry, UsesExactBackgroundAndTrackDimensions)
+{
+    const Rect nameRect(80, 100, 40, 12);
+
+    const auto geometry = Creature::getCastProgressBarGeometry(nameRect, 0.5F);
+
+    EXPECT_EQ(31, geometry.background.width());
+    EXPECT_EQ(4, geometry.background.height());
+    EXPECT_EQ(29, geometry.track.width());
+    EXPECT_EQ(2, geometry.track.height());
+}
+
+TEST(CastProgressGeometry, CentersTheBarOverTheName)
+{
+    const Rect nameRect(80, 100, 40, 12);
+
+    const auto geometry = Creature::getCastProgressBarGeometry(nameRect, 0.5F);
+
+    EXPECT_EQ(nameRect.horizontalCenter(), geometry.background.horizontalCenter());
+}
+
+TEST(CastProgressGeometry, KeepsTheApprovedTwoPixelNameOffset)
+{
+    const Rect nameRect(80, 100, 40, 12);
+
+    const auto geometry = Creature::getCastProgressBarGeometry(nameRect, 0.5F);
+
+    EXPECT_EQ(nameRect.top() - 2, geometry.background.bottom());
+}
+
+TEST(CastProgressGeometry, InsetsTheTrackByOnePixel)
+{
+    const Rect nameRect(80, 100, 40, 12);
+
+    const auto geometry = Creature::getCastProgressBarGeometry(nameRect, 0.5F);
+
+    EXPECT_EQ(geometry.background.left() + 1, geometry.track.left());
+    EXPECT_EQ(geometry.background.top() + 1, geometry.track.top());
+}
+
+TEST(CastProgressGeometry, ProducesZeroWidthAtZeroPercent)
+{
+    const auto geometry = Creature::getCastProgressBarGeometry(Rect(80, 100, 40, 12), 0.0F);
+
+    EXPECT_EQ(0, geometry.fill.width());
+    EXPECT_TRUE(geometry.fill.isEmpty());
+}
+
+TEST(CastProgressGeometry, FloorsHalfProgressToFourteenPixels)
+{
+    const auto geometry = Creature::getCastProgressBarGeometry(Rect(80, 100, 40, 12), 0.5F);
+
+    EXPECT_EQ(14, geometry.fill.width());
+    EXPECT_EQ(geometry.track.left(), geometry.fill.left());
+}
+
+TEST(CastProgressGeometry, ProducesFullWidthAtOneHundredPercent)
+{
+    const auto geometry = Creature::getCastProgressBarGeometry(Rect(80, 100, 40, 12), 1.0F);
+
+    EXPECT_EQ(29, geometry.fill.width());
+}
+
+TEST(CastProgressGeometry, ClampsProgressOutsideTheValidRange)
+{
+    EXPECT_EQ(0, Creature::getCastProgressFillWidth(-1.0F));
+    EXPECT_EQ(29, Creature::getCastProgressFillWidth(2.0F));
+}
+
+TEST(CastProgressGeometry, UsesTheApprovedExactColors)
+{
+    EXPECT_EQ(Color(0x00, 0x00, 0x00), Creature::getCastProgressBackgroundColor());
+    EXPECT_EQ(Color(0x40, 0x40, 0x40), Creature::getCastProgressTrackColor());
+    EXPECT_EQ(Color(0xFF, 0xFF, 0xFF), Creature::getCastProgressFillColor());
+}
+
+TEST(CastProgressGeometry, RemainsEligibleWithOnlyNamesEnabled)
+{
+    EXPECT_TRUE(Creature::shouldDrawCastProgress(Otc::DrawNames));
+}
+
+TEST(CastProgressGeometry, RemainsEligibleWithOnlyHealthBarsEnabled)
+{
+    EXPECT_TRUE(Creature::shouldDrawCastProgress(Otc::DrawBars));
+}
+
+TEST(CastProgressGeometry, IsHiddenWhenAllCreatureInformationIsDisabled)
+{
+    EXPECT_FALSE(Creature::shouldDrawCastProgress(Otc::DrawThings));
 }
