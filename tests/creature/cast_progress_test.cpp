@@ -1,6 +1,13 @@
 #include <gtest/gtest.h>
 
+#define private public
+#include "client/protocolgame.h"
+#undef private
+
+#include "client/castprogressprotocol.h"
 #include "client/creature.h"
+#include "client/game.h"
+#include "client/map.h"
 
 #include <framework/core/logger.h>
 #include <framework/core/resourcemanager.h>
@@ -34,6 +41,44 @@ private:
 [[maybe_unused]] testing::Environment* const g_frameworkEnv = testing::AddGlobalTestEnvironment(new FrameworkEnvironment);
 
 constexpr auto startTime = CastProgressClock::time_point{} + std::chrono::seconds(10);
+
+void appendU8(std::string& bytes, const uint8_t value)
+{
+    bytes.push_back(static_cast<char>(value));
+}
+
+void appendU32(std::string& bytes, const uint32_t value)
+{
+    for (uint8_t shift = 0; shift < 32; shift += 8)
+        appendU8(bytes, static_cast<uint8_t>(value >> shift));
+}
+
+void appendU64(std::string& bytes, const uint64_t value)
+{
+    for (uint8_t shift = 0; shift < 64; shift += 8)
+        appendU8(bytes, static_cast<uint8_t>(value >> shift));
+}
+
+InputMessagePtr makeInputMessage(const std::string& bytes)
+{
+    auto msg = std::make_shared<InputMessage>();
+    msg->setBuffer(bytes);
+    msg->setReadPos(g_game.getClientVersion() >= 1405 ? 7 : 8);
+    return msg;
+}
+
+CreaturePtr registerCreature(const uint32_t id)
+{
+    auto creature = std::make_shared<Creature>();
+    creature->setId(id);
+    g_map.addCreature(creature);
+    return creature;
+}
+
+void unregisterCreature(const uint32_t id)
+{
+    g_map.removeCreatureById(id);
+}
 
 } // namespace
 
@@ -215,4 +260,249 @@ TEST(CastProgressState, StateIsIsolatedPerCreature)
     EXPECT_FALSE(second.hasCastProgress());
     EXPECT_FALSE(second.applyCastProgressCancel(21));
     EXPECT_TRUE(first.hasCastProgress());
+}
+
+TEST(CastProgressProtocol, ReservesTheApprovedNumericContract)
+{
+    EXPECT_EQ(136u, CastProgressProtocol::Feature);
+    EXPECT_EQ(136, Otc::GameCastProgress);
+    EXPECT_EQ(15u, CastProgressProtocol::CreatureDataSubtype);
+    EXPECT_EQ(1u, static_cast<uint8_t>(CastProgressProtocol::Action::Start));
+    EXPECT_EQ(2u, static_cast<uint8_t>(CastProgressProtocol::Action::Cancel));
+}
+
+TEST(CastProgressProtocol, DecodesExactStartAndPreservesAlignment)
+{
+    std::string bytes;
+    appendU8(bytes, 1);
+    appendU64(bytes, 0x0102030405060708ULL);
+    appendU32(bytes, 700);
+    appendU32(bytes, 350);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+
+    const auto command = CastProgressProtocol::readCommand(msg);
+
+    EXPECT_EQ(CastProgressProtocol::Action::Start, command.action);
+    EXPECT_EQ(0x0102030405060708ULL, command.id);
+    EXPECT_EQ(700u, command.durationMs);
+    EXPECT_EQ(350u, command.remainingMs);
+    EXPECT_EQ(0xAAu, msg->getU8());
+}
+
+TEST(CastProgressProtocol, DecodesExactCancelAndPreservesAlignment)
+{
+    std::string bytes;
+    appendU8(bytes, 2);
+    appendU64(bytes, 0x0102030405060708ULL);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+
+    const auto command = CastProgressProtocol::readCommand(msg);
+
+    EXPECT_EQ(CastProgressProtocol::Action::Cancel, command.action);
+    EXPECT_EQ(0x0102030405060708ULL, command.id);
+    EXPECT_EQ(0xAAu, msg->getU8());
+}
+
+TEST(CastProgressProtocol, UnknownActionFailsDeterministically)
+{
+    const auto msg = makeInputMessage(std::string(1, static_cast<char>(3)));
+
+    EXPECT_THROW(CastProgressProtocol::readCommand(msg), stdext::exception);
+}
+
+TEST(CastProgressProtocol, StandaloneStartMutatesAKnownCreatureAfterFullDecode)
+{
+    constexpr uint32_t creatureId = 5001;
+    const auto creature = registerCreature(creatureId);
+    std::string bytes;
+    appendU32(bytes, creatureId);
+    appendU8(bytes, CastProgressProtocol::CreatureDataSubtype);
+    appendU8(bytes, 1);
+    appendU64(bytes, 30);
+    appendU32(bytes, 1000);
+    appendU32(bytes, 500);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+    ProtocolGame protocol;
+
+    protocol.parseCreatureData(msg);
+
+    EXPECT_EQ(30u, creature->getActiveCastProgressId());
+    EXPECT_EQ(0xAAu, msg->getU8());
+    unregisterCreature(creatureId);
+}
+
+TEST(CastProgressProtocol, UnknownCreatureConsumesACompleteStartWithoutOrphanState)
+{
+    std::string bytes;
+    appendU32(bytes, 5999);
+    appendU8(bytes, CastProgressProtocol::CreatureDataSubtype);
+    appendU8(bytes, 1);
+    appendU64(bytes, 31);
+    appendU32(bytes, 1000);
+    appendU32(bytes, 500);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+    ProtocolGame protocol;
+
+    protocol.parseCreatureData(msg);
+
+    EXPECT_EQ(nullptr, g_map.getCreatureById(5999));
+    EXPECT_EQ(0xAAu, msg->getU8());
+}
+
+TEST(CastProgressProtocol, StandaloneCancelRemovesOnlyTheMatchingActiveCast)
+{
+    constexpr uint32_t creatureId = 5005;
+    const auto creature = registerCreature(creatureId);
+    ASSERT_EQ(CastProgressApplyResult::Applied, creature->applyCastProgressStart(34, 1000, 1000, startTime));
+    std::string bytes;
+    appendU32(bytes, creatureId);
+    appendU8(bytes, CastProgressProtocol::CreatureDataSubtype);
+    appendU8(bytes, 2);
+    appendU64(bytes, 34);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+    ProtocolGame protocol;
+
+    protocol.parseCreatureData(msg);
+
+    EXPECT_FALSE(creature->hasCastProgress());
+    EXPECT_EQ(0xAAu, msg->getU8());
+    unregisterCreature(creatureId);
+}
+
+TEST(CastProgressProtocol, ZeroDurationIsConsumedAndIgnored)
+{
+    constexpr uint32_t creatureId = 5002;
+    const auto creature = registerCreature(creatureId);
+    std::string bytes;
+    appendU32(bytes, creatureId);
+    appendU8(bytes, CastProgressProtocol::CreatureDataSubtype);
+    appendU8(bytes, 1);
+    appendU64(bytes, 32);
+    appendU32(bytes, 0);
+    appendU32(bytes, 0);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+    ProtocolGame protocol;
+
+    protocol.parseCreatureData(msg);
+
+    EXPECT_FALSE(creature->hasCastProgress());
+    EXPECT_EQ(0xAAu, msg->getU8());
+    unregisterCreature(creatureId);
+}
+
+TEST(CastProgressProtocol, OversizedRemainingIsClampedByCreatureState)
+{
+    constexpr uint32_t creatureId = 5003;
+    const auto creature = registerCreature(creatureId);
+    std::string bytes;
+    appendU32(bytes, creatureId);
+    appendU8(bytes, CastProgressProtocol::CreatureDataSubtype);
+    appendU8(bytes, 1);
+    appendU64(bytes, 33);
+    appendU32(bytes, 1000);
+    appendU32(bytes, 2000);
+    const auto msg = makeInputMessage(bytes);
+    ProtocolGame protocol;
+
+    protocol.parseCreatureData(msg);
+
+    const auto progress = creature->getCastProgress();
+    ASSERT_TRUE(progress.has_value());
+    EXPECT_GE(*progress, 0.0F);
+    EXPECT_LT(*progress, 0.01F);
+    unregisterCreature(creatureId);
+}
+
+TEST(CastProgressProtocol, StaleStartCannotReplaceNewerState)
+{
+    constexpr uint32_t creatureId = 5004;
+    const auto creature = registerCreature(creatureId);
+    ASSERT_EQ(CastProgressApplyResult::Applied, creature->applyCastProgressStart(40, 1000, 1000, startTime));
+    std::string bytes;
+    appendU32(bytes, creatureId);
+    appendU8(bytes, CastProgressProtocol::CreatureDataSubtype);
+    appendU8(bytes, 1);
+    appendU64(bytes, 39);
+    appendU32(bytes, 1000);
+    appendU32(bytes, 500);
+    const auto msg = makeInputMessage(bytes);
+    ProtocolGame protocol;
+
+    protocol.parseCreatureData(msg);
+
+    EXPECT_EQ(40u, creature->getActiveCastProgressId());
+    unregisterCreature(creatureId);
+}
+
+TEST(CastProgressProtocol, FeatureOffLeavesSnapshotTailUnread)
+{
+    const auto creature = std::make_shared<Creature>();
+    const auto msg = makeInputMessage(std::string(1, static_cast<char>(0xAA)));
+
+    CastProgressProtocol::parseSnapshotTail(msg, creature, false, startTime);
+
+    EXPECT_EQ(0xAAu, msg->getU8());
+    EXPECT_FALSE(creature->hasCastProgress());
+}
+
+TEST(CastProgressProtocol, ActiveSnapshotAppliesAndPreservesAlignment)
+{
+    const auto creature = std::make_shared<Creature>();
+    std::string bytes;
+    appendU8(bytes, 1);
+    appendU64(bytes, 41);
+    appendU32(bytes, 1000);
+    appendU32(bytes, 500);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+
+    CastProgressProtocol::parseSnapshotTail(msg, creature, true, startTime);
+
+    EXPECT_EQ(41u, creature->getActiveCastProgressId());
+    EXPECT_EQ(0xAAu, msg->getU8());
+}
+
+TEST(CastProgressProtocol, ActiveSnapshotForUnknownCreatureStillConsumesPayload)
+{
+    std::string bytes;
+    appendU8(bytes, 1);
+    appendU64(bytes, 42);
+    appendU32(bytes, 1000);
+    appendU32(bytes, 500);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+
+    CastProgressProtocol::parseSnapshotTail(msg, nullptr, true, startTime);
+
+    EXPECT_EQ(0xAAu, msg->getU8());
+}
+
+TEST(CastProgressProtocol, InactiveSnapshotClearsPresentationAndOrdering)
+{
+    const auto creature = std::make_shared<Creature>();
+    ASSERT_EQ(CastProgressApplyResult::Applied, creature->applyCastProgressStart(43, 1000, 1000, startTime));
+    std::string bytes;
+    appendU8(bytes, 0);
+    appendU8(bytes, 0xAA);
+    const auto msg = makeInputMessage(bytes);
+
+    CastProgressProtocol::parseSnapshotTail(msg, creature, true, startTime);
+
+    EXPECT_FALSE(creature->hasCastProgress());
+    EXPECT_EQ(CastProgressApplyResult::Applied, creature->applyCastProgressStart(43, 1000, 500, startTime));
+    EXPECT_EQ(0xAAu, msg->getU8());
+}
+
+TEST(CastProgressProtocol, InvalidSnapshotMarkerFailsDeterministically)
+{
+    const auto creature = std::make_shared<Creature>();
+    const auto msg = makeInputMessage(std::string(1, static_cast<char>(2)));
+
+    EXPECT_THROW(CastProgressProtocol::parseSnapshotTail(msg, creature, true, startTime), stdext::exception);
 }
