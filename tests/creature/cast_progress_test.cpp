@@ -2,16 +2,19 @@
 
 #define private public
 #include "client/protocolgame.h"
+#include "client/creature.h"
 #undef private
 
 #include "client/castprogressprotocol.h"
-#include "client/creature.h"
 #include "client/game.h"
 #include "client/map.h"
 
 #include <framework/core/logger.h>
 #include <framework/core/resourcemanager.h>
+#include <framework/core/eventdispatcher.h>
 #include <framework/graphics/texturemanager.h>
+#include <framework/luaengine/luainterface.h>
+#include <framework/ui/uiwidget.h>
 
 namespace {
 
@@ -24,12 +27,17 @@ public:
         g_logger.setLevel(Fw::LogFatal);
         g_resources.init(".");
         g_resources.addSearchPath(".");
+        g_dispatcher.init();
+        g_dispatcher.shutdown();
+        g_lua.init();
+        g_lua.registerClass<UIWidget>();
         g_textures.init();
     }
 
     void TearDown() override
     {
         g_textures.terminate();
+        g_lua.terminate();
         g_resources.terminate();
         g_logger.setLevel(m_previousLogLevel);
     }
@@ -79,6 +87,34 @@ void unregisterCreature(const uint32_t id)
 {
     g_map.removeCreatureById(id);
 }
+
+struct CastProgressWidgetFixture
+{
+    CreaturePtr creature = std::make_shared<Creature>();
+    UIWidgetPtr root = std::make_shared<UIWidget>();
+    UIWidgetPtr bar = std::make_shared<UIWidget>();
+    UIWidgetPtr track = std::make_shared<UIWidget>();
+    UIWidgetPtr fill = std::make_shared<UIWidget>();
+
+    CastProgressWidgetFixture()
+    {
+        bar->setId("castProgressBar");
+        bar->resize(31, 4);
+        track->setId("castProgressTrack");
+        track->resize(29, 2);
+        fill->setId("castProgressFill");
+        fill->resize(0, 2);
+        bar->addChild(track);
+        bar->addChild(fill);
+        root->addChild(bar);
+        creature->setWidgetInformation(root);
+    }
+
+    ~CastProgressWidgetFixture()
+    {
+        creature->setWidgetInformation(nullptr);
+    }
+};
 
 } // namespace
 
@@ -600,4 +636,88 @@ TEST(CastProgressGeometry, RemainsEligibleWithOnlyHealthBarsEnabled)
 TEST(CastProgressGeometry, IsHiddenWhenAllCreatureInformationIsDisabled)
 {
     EXPECT_FALSE(Creature::shouldDrawCastProgress(Otc::DrawThings));
+}
+
+TEST(CastProgressWidget, CachesContainerAndFillWhenInformationWidgetIsAssigned)
+{
+    CastProgressWidgetFixture fixture;
+
+    EXPECT_EQ(fixture.bar, fixture.creature->m_castProgressWidget);
+    EXPECT_EQ(fixture.fill, fixture.creature->m_castProgressFillWidget);
+}
+
+TEST(CastProgressWidget, ClearsCachedReferencesWhenInformationWidgetIsRemoved)
+{
+    CastProgressWidgetFixture fixture;
+
+    fixture.creature->setWidgetInformation(nullptr);
+
+    EXPECT_FALSE(fixture.creature->m_castProgressWidget);
+    EXPECT_FALSE(fixture.creature->m_castProgressFillWidget);
+}
+
+TEST(CastProgressWidget, HidesTheContainerWithoutAnActiveCast)
+{
+    CastProgressWidgetFixture fixture;
+
+    fixture.creature->updateCastProgressWidget(Otc::DrawCreatureInfo, startTime);
+
+    EXPECT_FALSE(fixture.bar->isExplicitlyVisible());
+}
+
+TEST(CastProgressWidget, ShowsZeroWhitePixelsAtCastStart)
+{
+    CastProgressWidgetFixture fixture;
+    ASSERT_EQ(CastProgressApplyResult::Applied,
+              fixture.creature->applyCastProgressStart(20, 1000, 1000, startTime));
+
+    fixture.creature->updateCastProgressWidget(Otc::DrawCreatureInfo, startTime);
+
+    EXPECT_TRUE(fixture.bar->isExplicitlyVisible());
+    EXPECT_EQ(0, fixture.fill->getWidth());
+}
+
+TEST(CastProgressWidget, UsesTheSharedFourteenPixelWidthAtHalfProgress)
+{
+    CastProgressWidgetFixture fixture;
+    ASSERT_EQ(CastProgressApplyResult::Applied,
+              fixture.creature->applyCastProgressStart(21, 1000, 500, startTime));
+
+    fixture.creature->updateCastProgressWidget(Otc::DrawCreatureInfo, startTime);
+
+    EXPECT_TRUE(fixture.bar->isExplicitlyVisible());
+    EXPECT_EQ(Creature::getCastProgressFillWidth(0.5F), fixture.fill->getWidth());
+    EXPECT_EQ(14, fixture.fill->getWidth());
+}
+
+TEST(CastProgressWidget, DrawsFullWidthOnceThenHidesOnTheNextFrame)
+{
+    CastProgressWidgetFixture fixture;
+    ASSERT_EQ(CastProgressApplyResult::Applied,
+              fixture.creature->applyCastProgressStart(22, 1000, 1000, startTime));
+
+    fixture.creature->updateCastProgressWidget(Otc::DrawCreatureInfo,
+                                               startTime + std::chrono::milliseconds(1000));
+    EXPECT_TRUE(fixture.bar->isExplicitlyVisible());
+    EXPECT_EQ(29, fixture.fill->getWidth());
+
+    fixture.creature->updateCastProgressWidget(Otc::DrawCreatureInfo,
+                                               startTime + std::chrono::milliseconds(1001));
+    EXPECT_FALSE(fixture.bar->isExplicitlyVisible());
+}
+
+TEST(CastProgressWidget, MissingFillKeepsAnIncompleteBarHidden)
+{
+    auto creature = std::make_shared<Creature>();
+    auto root = std::make_shared<UIWidget>();
+    auto bar = std::make_shared<UIWidget>();
+    bar->setId("castProgressBar");
+    root->addChild(bar);
+    creature->setWidgetInformation(root);
+    ASSERT_EQ(CastProgressApplyResult::Applied, creature->applyCastProgressStart(23, 1000, 1000, startTime));
+
+    creature->updateCastProgressWidget(Otc::DrawCreatureInfo, startTime);
+
+    EXPECT_FALSE(bar->isExplicitlyVisible());
+    creature->setWidgetInformation(nullptr);
 }

@@ -268,8 +268,10 @@ void Creature::drawInformation(const MapPosInfo& mapRect, const Point& dest, con
         return;
 
     if (g_gameConfig.isDrawingInformationByWidget()) {
-        if (m_widgetInformation)
+        if (m_widgetInformation) {
+            updateCastProgressWidget(drawFlags);
             m_widgetInformation->draw(mapRect.rect, DrawPoolType::FOREGROUND);
+        }
         return;
     }
 
@@ -1452,6 +1454,18 @@ void Creature::setStaticWalking(const uint16_t v) {
     }, std::min<int>(v / g_gameConfig.getSpriteSize(), DrawPool::FPS60));
 }
 
+void Creature::updateCastProgressWidget(const int drawFlags, const CastProgressClock::time_point now)
+{
+    if (!m_castProgressWidget)
+        return;
+
+    const auto progress = getCastProgress(now);
+    const bool visible = progress.has_value() && m_castProgressFillWidget && shouldDrawCastProgress(drawFlags);
+    m_castProgressWidget->setVisible(visible);
+    if (visible)
+        m_castProgressFillWidget->setWidth_px(getCastProgressFillWidth(*progress));
+}
+
 void Creature::setWidgetInformation(const UIWidgetPtr& info) {
     if (m_widgetInformation == info)
         return;
@@ -1461,9 +1475,15 @@ void Creature::setWidgetInformation(const UIWidgetPtr& info) {
     }
 
     m_widgetInformation = info;
+    m_castProgressWidget = nullptr;
+    m_castProgressFillWidget = nullptr;
 
     if (!info)
         return;
+
+    m_castProgressWidget = info->getChildById("castProgressBar");
+    if (m_castProgressWidget)
+        m_castProgressFillWidget = m_castProgressWidget->getChildById("castProgressFill");
 
     info->setDraggable(false);
     g_map.addAttachedWidgetToObject(info, std::static_pointer_cast<AttachableObject>(shared_from_this()));

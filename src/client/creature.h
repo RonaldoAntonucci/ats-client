@@ -292,6 +292,7 @@ private:
     void updateShield();
     void updateWalkingTile();
     void updateWalkAnimation();
+    void updateCastProgressWidget(int drawFlags, CastProgressClock::time_point now = CastProgressClock::now());
 
     uint16_t getCurrentAnimationPhase(bool mount = false);
 
@@ -333,6 +334,8 @@ private:
     std::vector<PaperdollPtr> m_paperdolls;
 
     UIWidgetPtr m_widgetInformation;
+    UIWidgetPtr m_castProgressWidget;
+    UIWidgetPtr m_castProgressFillWidget;
 
     TilePtr m_walkingTile;
 
