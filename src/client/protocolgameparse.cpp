@@ -23,6 +23,7 @@
 #include "animatedtext.h"
 #include "attachedeffect.h"
 #include "attachedeffectmanager.h"
+#include "castprogressprotocol.h"
 #include "effect.h"
 #include "game.h"
 #include "gameconfig.h"
@@ -2361,11 +2362,6 @@ void ProtocolGame::parseCreatureData(const InputMessagePtr& msg)
     const uint32_t creatureId = msg->getU32();
     const uint8_t type = msg->getU8();
 
-    const auto& creature = g_map.getCreatureById(creatureId);
-    if (!creature) {
-        g_logger.traceDebug("ProtocolGame::parseCreatureData: could not get creature with id {}", creatureId);
-    }
-
     switch (type) {
         case 0: // creature update
             getCreature(msg);
@@ -2378,6 +2374,22 @@ void ProtocolGame::parseCreatureData(const InputMessagePtr& msg)
         case 14: // creature icons
             addCreatureIcon(msg, creatureId);
             break;
+        case CastProgressProtocol::CreatureDataSubtype: {
+            const auto command = CastProgressProtocol::readCommand(msg);
+            const auto& creature = g_map.getCreatureById(creatureId);
+            if (!creature) {
+                g_logger.traceDebug("ProtocolGame::parseCreatureData: could not get creature with id {}", creatureId);
+                break;
+            }
+
+            if (command.action == CastProgressProtocol::Action::Start)
+                creature->applyCastProgressStart(command.id, command.durationMs, command.remainingMs);
+            else
+                creature->applyCastProgressCancel(command.id);
+            break;
+        }
+        default:
+            throw stdext::exception("[ProtocolGame::parseCreatureData] Unknown subtype {}", type);
     }
 }
 
@@ -4229,6 +4241,8 @@ CreaturePtr ProtocolGame::getCreature(const InputMessagePtr& msg, int type) cons
                 attachedEffectList.push_back(msg->getU16());
             }
         }
+
+        CastProgressProtocol::parseSnapshotTail(msg, creature, g_game.getFeature(Otc::GameCastProgress));
 
         if (creature) {
             creature->setHealthPercent(healthPercent);

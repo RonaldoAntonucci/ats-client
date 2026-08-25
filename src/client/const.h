@@ -665,6 +665,7 @@ namespace Otc
         GameNpcWindowRedesign = 133,
         GameTaskboard = 134,
         GameProficiency = 135,
+        GameCastProgress = 136,
         LastGameFeature
     };
 

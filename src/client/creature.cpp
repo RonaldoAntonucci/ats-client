@@ -71,6 +71,102 @@ bool Creature::isHidden() const {
     return g_game.getClientVersion() < 1273 && m_healthPercent == 0;
 }
 
+CastProgressApplyResult Creature::applyCastProgressStart(const uint64_t castId, const uint32_t durationMs,
+                                                         const uint32_t remainingMs, const CastProgressClock::time_point now)
+{
+    if (castId == 0 || durationMs == 0)
+        return CastProgressApplyResult::IgnoredInvalid;
+
+    if (m_castProgress.lastAcceptedId) {
+        if (castId < *m_castProgress.lastAcceptedId)
+            return CastProgressApplyResult::IgnoredStale;
+        if (castId == *m_castProgress.lastAcceptedId && (!m_castProgress.active || m_castProgress.activeId != castId))
+            return CastProgressApplyResult::IgnoredStale;
+    }
+
+    const auto result = m_castProgress.active && m_castProgress.activeId == castId
+        ? CastProgressApplyResult::Refreshed
+        : CastProgressApplyResult::Applied;
+    const auto clampedRemainingMs = std::min(remainingMs, durationMs);
+
+    m_castProgress.activeId = castId;
+    m_castProgress.lastAcceptedId = castId;
+    m_castProgress.durationMs = durationMs;
+    m_castProgress.startedAt = now - std::chrono::milliseconds(durationMs - clampedRemainingMs);
+    m_castProgress.active = true;
+    return result;
+}
+
+bool Creature::applyCastProgressCancel(const uint64_t castId)
+{
+    if (!m_castProgress.active || m_castProgress.activeId != castId)
+        return false;
+
+    clearCastProgress();
+    return true;
+}
+
+void Creature::applyCastProgressSnapshot(const std::optional<CastProgressWireState>& snapshot,
+                                         const CastProgressClock::time_point now)
+{
+    clearCastProgress(true);
+    if (snapshot)
+        applyCastProgressStart(snapshot->id, snapshot->durationMs, snapshot->remainingMs, now);
+}
+
+void Creature::clearCastProgress(const bool clearOrdering)
+{
+    m_castProgress.activeId = 0;
+    m_castProgress.durationMs = 0;
+    m_castProgress.startedAt = {};
+    m_castProgress.active = false;
+    if (clearOrdering)
+        m_castProgress.lastAcceptedId.reset();
+}
+
+std::optional<float> Creature::getCastProgress(const CastProgressClock::time_point now)
+{
+    if (!m_castProgress.active)
+        return std::nullopt;
+
+    const auto elapsedMs = std::chrono::duration<float, std::milli>(now - m_castProgress.startedAt).count();
+    if (elapsedMs >= static_cast<float>(m_castProgress.durationMs)) {
+        clearCastProgress();
+        return 1.0F;
+    }
+
+    return std::clamp(elapsedMs / static_cast<float>(m_castProgress.durationMs), 0.0F, 1.0F);
+}
+
+int Creature::getCastProgressFillWidth(const float progress)
+{
+    return static_cast<int>(std::floor(29.0F * std::clamp(progress, 0.0F, 1.0F)));
+}
+
+CastProgressBarGeometry Creature::getCastProgressBarGeometry(const Rect& textRect, const float progress)
+{
+    Rect background(0, 0, 31, 4);
+    background.moveHorizontalCenter(textRect.horizontalCenter());
+    background.moveBottom(textRect.top() - 2);
+
+    Rect track = background.expanded(-1);
+    Rect fill = track;
+    fill.setWidth(getCastProgressFillWidth(progress));
+    return { background, track, fill };
+}
+
+bool Creature::shouldDrawCastProgress(const int drawFlags)
+{
+    return (drawFlags & Otc::DrawCreatureInfo) != 0;
+}
+
+std::optional<uint64_t> Creature::getActiveCastProgressId() const
+{
+    if (!m_castProgress.active)
+        return std::nullopt;
+    return m_castProgress.activeId;
+}
+
 void Creature::onCreate() {
     callLuaField("onCreate");
 }
@@ -172,8 +268,10 @@ void Creature::drawInformation(const MapPosInfo& mapRect, const Point& dest, con
         return;
 
     if (g_gameConfig.isDrawingInformationByWidget()) {
-        if (m_widgetInformation)
+        if (m_widgetInformation) {
+            updateCastProgressWidget(drawFlags);
             m_widgetInformation->draw(mapRect.rect, DrawPoolType::FOREGROUND);
+        }
         return;
     }
 
@@ -232,6 +330,21 @@ void Creature::drawInformation(const MapPosInfo& mapRect, const Point& dest, con
         backgroundRect.moveTop(textRect.top() + offset);
     if (backgroundRect.bottom() == parentRect.bottom())
         textRect.moveTop(backgroundRect.top() - offset);
+
+    if (const auto progress = getCastProgress(); progress && shouldDrawCastProgress(drawFlags)) {
+        auto geometry = getCastProgressBarGeometry(textRect, *progress);
+        if (!isScaled) {
+            geometry.background.bind(parentRect);
+            geometry.track = geometry.background.expanded(-1);
+            geometry.fill = geometry.track;
+            geometry.fill.setWidth(getCastProgressFillWidth(*progress));
+        }
+
+        g_drawPool.addFilledRect(geometry.background, getCastProgressBackgroundColor());
+        g_drawPool.addFilledRect(geometry.track, getCastProgressTrackColor());
+        if (!geometry.fill.isEmpty())
+            g_drawPool.addFilledRect(geometry.fill, getCastProgressFillColor());
+    }
 
     // health rect is based on background rect, so no worries
     Rect healthRect = backgroundRect.expanded(-1);
@@ -645,6 +758,7 @@ void Creature::onDisappear()
     m_disappearEvent = g_dispatcher.addEvent([self] {
         self->m_removed = true;
         self->stopWalk();
+        self->clearCastProgress(true);
 
         self->callLuaField("onDisappear");
 
@@ -1340,6 +1454,18 @@ void Creature::setStaticWalking(const uint16_t v) {
     }, std::min<int>(v / g_gameConfig.getSpriteSize(), DrawPool::FPS60));
 }
 
+void Creature::updateCastProgressWidget(const int drawFlags, const CastProgressClock::time_point now)
+{
+    if (!m_castProgressWidget)
+        return;
+
+    const auto progress = getCastProgress(now);
+    const bool visible = progress.has_value() && m_castProgressFillWidget && shouldDrawCastProgress(drawFlags);
+    m_castProgressWidget->setVisible(visible);
+    if (visible)
+        m_castProgressFillWidget->setWidth_px(getCastProgressFillWidth(*progress));
+}
+
 void Creature::setWidgetInformation(const UIWidgetPtr& info) {
     if (m_widgetInformation == info)
         return;
@@ -1349,9 +1475,15 @@ void Creature::setWidgetInformation(const UIWidgetPtr& info) {
     }
 
     m_widgetInformation = info;
+    m_castProgressWidget = nullptr;
+    m_castProgressFillWidget = nullptr;
 
     if (!info)
         return;
+
+    m_castProgressWidget = info->getChildById("castProgressBar");
+    if (m_castProgressWidget)
+        m_castProgressFillWidget = m_castProgressWidget->getChildById("castProgressFill");
 
     info->setDraggable(false);
     g_map.addAttachedWidgetToObject(info, std::static_pointer_cast<AttachableObject>(shared_from_this()));
